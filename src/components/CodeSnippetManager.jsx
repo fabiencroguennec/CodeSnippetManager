@@ -1,8 +1,23 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Search, Plus, Copy, Edit2, Trash2, Save, X, Code, FileText, Download, Upload, Moon, Sun, Tag, Filter } from 'lucide-react';
+import { useSupabase } from '../hooks/useSupabase';
 
 const CodeSnippetManager = () => {
-  const [pages, setPages] = useState([]);
+  // Hook Supabase
+  const {
+    pages,
+    availableTags,
+    loading,
+    error,
+    createPage,
+    updatePage,
+    deletePage,
+    createConsole,
+    updateConsole,
+    deleteConsole
+  } = useSupabase();
+
+  // États locaux pour l'interface
   const [currentPage, setCurrentPage] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -10,146 +25,23 @@ const CodeSnippetManager = () => {
   const [editingPage, setEditingPage] = useState(null);
   const [editingConsole, setEditingConsole] = useState(null);
   const [darkMode, setDarkMode] = useState(false);
-  const [availableTags, setAvailableTags] = useState([]);
   const [selectedTags, setSelectedTags] = useState([]);
   const [showTagFilter, setShowTagFilter] = useState(false);
-  const fileInputRef = useRef(null);
+
+  // États pour éviter les conflits d'écriture
+  const [localValues, setLocalValues] = useState({});
+  const [updateTimeouts, setUpdateTimeouts] = useState({});
 
   const languages = [
     'javascript', 'python', 'java', 'cpp', 'csharp', 'php', 'ruby', 'go', 
     'rust', 'typescript', 'html', 'css', 'sql', 'bash', 'json', 'xml', 'yaml'
   ];
 
-  const isLocalStorageAvailable = () => {
-    try {
-      if (typeof window === 'undefined') return false;
-      if (!window.localStorage) return false;
-      const testKey = '__test__';
-      window.localStorage.setItem(testKey, 'test');
-      window.localStorage.removeItem(testKey);
-      return true;
-    } catch (e) {
-      console.warn('localStorage non disponible:', e);
-      return false;
-    }
-  };
-
-  const getFromStorage = (key, defaultValue = null) => {
-    if (!isLocalStorageAvailable()) return defaultValue;
-    try {
-      const item = window.localStorage.getItem(key);
-      return item ? JSON.parse(item) : defaultValue;
-    } catch (error) {
-      console.warn('Erreur lecture storage:', error);
-      return defaultValue;
-    }
-  };
-
-  const setToStorage = (key, value) => {
-    if (!isLocalStorageAvailable()) return false;
-    try {
-      window.localStorage.setItem(key, JSON.stringify(value));
-      return true;
-    } catch (error) {
-      console.warn('Erreur sauvegarde storage:', error);
-      return false;
-    }
-  };
-
-  useEffect(() => {
-    try {
-      const savedPages = getFromStorage('codeSnippetPages', []);
-      const savedDarkMode = getFromStorage('darkMode', false);
-      const savedTags = getFromStorage('availableTags', []);
-      
-      if (savedPages && Array.isArray(savedPages) && savedPages.length > 0) {
-        const normalizedPages = savedPages.map(page => ({
-          ...page,
-          tags: page.tags || [],
-          consoles: (page.consoles || []).map(console => ({
-            ...console,
-            tags: console.tags || [],
-            beforeText: console.beforeText || '',
-            afterText: console.afterText || '',
-            language: console.language || 'javascript',
-            showBeforeText: Boolean(console.beforeText) || Boolean(console.showBeforeText),
-            showAfterText: Boolean(console.afterText) || Boolean(console.showAfterText)
-          }))
-        }));
-        setPages(normalizedPages);
-        updateAvailableTags(normalizedPages);
-      }
-      
-      if (savedTags && Array.isArray(savedTags)) {
-        setAvailableTags(savedTags);
-      }
-      
-      if (typeof savedDarkMode === 'boolean') {
-        setDarkMode(savedDarkMode);
-      }
-    } catch (error) {
-      console.warn('Erreur chargement initial:', error);
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      if (pages.length > 0) {
-        setToStorage('codeSnippetPages', pages);
-        updateAvailableTags(pages);
-      }
-    } catch (error) {
-      console.warn('Erreur sauvegarde pages:', error);
-    }
-  }, [pages]);
-
-  useEffect(() => {
-    try {
-      setToStorage('darkMode', darkMode);
-    } catch (error) {
-      console.warn('Erreur sauvegarde theme:', error);
-    }
-  }, [darkMode]);
-
-  useEffect(() => {
-    try {
-      if (availableTags.length > 0) {
-        setToStorage('availableTags', availableTags);
-      }
-    } catch (error) {
-      console.warn('Erreur sauvegarde tags:', error);
-    }
-  }, [availableTags]);
-
-  const updateAvailableTags = (pagesList) => {
-    const allTags = new Set();
-    pagesList.forEach(page => {
-      if (page.tags && Array.isArray(page.tags)) {
-        page.tags.forEach(tag => {
-          if (tag && tag.trim()) {
-            allTags.add(tag.trim());
-          }
-        });
-      }
-      if (page.consoles && Array.isArray(page.consoles)) {
-        page.consoles.forEach(console => {
-          if (console.tags && Array.isArray(console.tags)) {
-            console.tags.forEach(tag => {
-              if (tag && tag.trim()) {
-                allTags.add(tag.trim());
-              }
-            });
-          }
-        });
-      }
-    });
-    const tagsArray = Array.from(allTags).sort();
-    setAvailableTags(tagsArray);
-  };
-
+  // Recherche dynamique COMPLÈTE
   useEffect(() => {
     let filteredPages = pages;
 
+    // Filtrer par tags sélectionnés
     if (selectedTags.length > 0) {
       filteredPages = pages.filter(page => {
         const pageTags = page.tags || [];
@@ -166,11 +58,14 @@ const CodeSnippetManager = () => {
 
     const query = searchQuery.toLowerCase();
     const results = filteredPages.filter(page => {
+      // Recherche dans le titre
       if (page.title.toLowerCase().includes(query)) return true;
       
+      // Recherche dans les tags de page
       const pageTags = page.tags || [];
       if (pageTags.some(tag => tag.toLowerCase().includes(query))) return true;
       
+      // Recherche dans les commentaires, code, tags et textes des consoles
       return page.consoles.some(console => {
         if (console.comment.toLowerCase().includes(query) ||
             console.code.toLowerCase().includes(query)) return true;
@@ -178,8 +73,8 @@ const CodeSnippetManager = () => {
         const consoleTags = console.tags || [];
         if (consoleTags.some(tag => tag.toLowerCase().includes(query))) return true;
         
-        if ((console.beforeText && console.beforeText.toLowerCase().includes(query)) ||
-            (console.afterText && console.afterText.toLowerCase().includes(query))) return true;
+        if ((console.before_text && console.before_text.toLowerCase().includes(query)) ||
+            (console.after_text && console.after_text.toLowerCase().includes(query))) return true;
         
         return false;
       });
@@ -190,8 +85,8 @@ const CodeSnippetManager = () => {
         console.comment.toLowerCase().includes(query) ||
         console.code.toLowerCase().includes(query) ||
         (console.tags || []).some(tag => tag.toLowerCase().includes(query)) ||
-        (console.beforeText && console.beforeText.toLowerCase().includes(query)) ||
-        (console.afterText && console.afterText.toLowerCase().includes(query))
+        (console.before_text && console.before_text.toLowerCase().includes(query)) ||
+        (console.after_text && console.after_text.toLowerCase().includes(query))
       );
       
       let matchType = 'console';
@@ -208,118 +103,154 @@ const CodeSnippetManager = () => {
     setSearchResults(results);
   }, [searchQuery, pages, selectedTags]);
 
-  const createNewPage = () => {
-    const newPage = {
-      id: Date.now(),
-      title: 'Nouvelle Page',
-      tags: [],
-      consoles: []
-    };
-    const updatedPages = [...pages, newPage];
-    setPages(updatedPages);
-    setCurrentPage(newPage);
-    setShowSearch(false);
-    setEditingPage(newPage.id);
-  };
+  // Fonction de mise à jour avec délai pour éviter les conflits
+  const debouncedUpdate = useCallback((type, id, field, value, delay = 1000) => {
+    // Mettre à jour localement immédiatement
+    setLocalValues(prev => ({
+      ...prev,
+      [`${type}-${id}-${field}`]: value
+    }));
 
-  const deletePage = (pageId) => {
-    setPages(pages.filter(p => p.id !== pageId));
-    if (currentPage && currentPage.id === pageId) {
-      setCurrentPage(null);
-      setShowSearch(true);
+    // Annuler l'ancien timeout
+    const timeoutKey = `${type}-${id}-${field}`;
+    if (updateTimeouts[timeoutKey]) {
+      clearTimeout(updateTimeouts[timeoutKey]);
     }
-  };
 
-  const updatePageTitle = (pageId, newTitle) => {
-    setPages(pages.map(p => 
-      p.id === pageId ? { ...p, title: newTitle } : p
-    ));
-    if (currentPage && currentPage.id === pageId) {
-      setCurrentPage({ ...currentPage, title: newTitle });
-    }
-  };
-
-  const updatePageTags = (pageId, newTags) => {
-    setPages(pages.map(p => 
-      p.id === pageId ? { ...p, tags: newTags } : p
-    ));
-    if (currentPage && currentPage.id === pageId) {
-      setCurrentPage({ ...currentPage, tags: newTags });
-    }
-  };
-
-  const addConsole = (pageId) => {
-    const newConsole = {
-      id: Date.now(),
-      code: '',
-      comment: 'Nouveau snippet',
-      language: 'javascript',
-      tags: [],
-      beforeText: '',
-      afterText: '',
-      showBeforeText: false,
-      showAfterText: false
-    };
-    
-    const updatedPages = pages.map(p => 
-      p.id === pageId 
-        ? { ...p, consoles: [...p.consoles, newConsole] }
-        : p
-    );
-    setPages(updatedPages);
-    
-    if (currentPage && currentPage.id === pageId) {
-      setCurrentPage({
-        ...currentPage,
-        consoles: [...currentPage.consoles, newConsole]
-      });
-    }
-    
-    setEditingConsole(newConsole.id);
-  };
-
-  const updateConsole = (pageId, consoleId, updates) => {
-    setPages(pages.map(p => 
-      p.id === pageId 
-        ? {
-            ...p, 
-            consoles: p.consoles.map(c => 
-              c.id === consoleId ? { ...c, ...updates } : c
-            )
+    // Créer un nouveau timeout
+    const newTimeout = setTimeout(async () => {
+      try {
+        if (type === 'page') {
+          if (field === 'title') {
+            await updatePage(id, { title: value, tags: currentPage.tags });
+            if (currentPage && currentPage.id === id) {
+              setCurrentPage({ ...currentPage, title: value });
+            }
+          } else if (field === 'tags') {
+            await updatePage(id, { title: currentPage.title, tags: value });
+            if (currentPage && currentPage.id === id) {
+              setCurrentPage({ ...currentPage, tags: value });
+            }
           }
-        : p
-    ));
+        } else if (type === 'console') {
+          const updates = { [field]: value };
+          const updatedConsole = await updateConsole(id, updates);
+          if (currentPage) {
+            setCurrentPage({
+              ...currentPage,
+              consoles: currentPage.consoles.map(c => 
+                c.id === id ? updatedConsole : c
+              )
+            });
+          }
+        }
+      } catch (err) {
+        console.error('Erreur mise à jour:', err);
+      }
+
+      // Nettoyer la valeur locale
+      setLocalValues(prev => {
+        const newValues = { ...prev };
+        delete newValues[timeoutKey];
+        return newValues;
+      });
+    }, delay);
+
+    // Sauvegarder le timeout
+    setUpdateTimeouts(prev => ({
+      ...prev,
+      [timeoutKey]: newTimeout
+    }));
+  }, [updatePage, updateConsole, currentPage]);
+
+  // Fonctions optimisées
+  const handleCreatePage = async () => {
+    try {
+      const newPage = await createPage({
+        title: 'Nouvelle Page',
+        tags: []
+      });
+      setCurrentPage(newPage);
+      setShowSearch(false);
+      setEditingPage(newPage.id);
+    } catch (err) {
+      alert('Erreur lors de la création de la page: ' + err.message);
+    }
+  };
+
+  const handleAddConsole = async (pageId) => {
+    try {
+      const newConsole = await createConsole({
+        page_id: pageId,
+        code: '',
+        comment: 'Nouveau snippet',
+        language: 'javascript',
+        tags: [],
+        before_text: '',
+        after_text: '',
+        show_before_text: false,
+        show_after_text: false
+      });
+      
+      if (currentPage && currentPage.id === pageId) {
+        setCurrentPage({
+          ...currentPage,
+          consoles: [...currentPage.consoles, newConsole]
+        });
+      }
+      
+      setEditingConsole(newConsole.id);
+    } catch (err) {
+      alert('Erreur lors de la création de la console: ' + err.message);
+    }
+  };
+
+  const handleDeletePage = async (pageId) => {
+    if (!confirm('Êtes-vous sûr de vouloir supprimer cette page ?')) return;
     
-    if (currentPage && currentPage.id === pageId) {
+    try {
+      await deletePage(pageId);
+      if (currentPage && currentPage.id === pageId) {
+        setCurrentPage(null);
+        setShowSearch(true);
+      }
+    } catch (err) {
+      alert('Erreur lors de la suppression: ' + err.message);
+    }
+  };
+
+  const handleDeleteConsole = async (consoleId) => {
+    if (!confirm('Êtes-vous sûr de vouloir supprimer cette console ?')) return;
+    
+    try {
+      await deleteConsole(consoleId);
+      
+      if (currentPage) {
+        setCurrentPage({
+          ...currentPage,
+          consoles: currentPage.consoles.filter(c => c.id !== consoleId)
+        });
+      }
+    } catch (err) {
+      alert('Erreur lors de la suppression: ' + err.message);
+    }
+  };
+
+  const toggleTextSection = async (pageId, consoleId, section) => {
+    const console = currentPage.consoles.find(c => c.id === consoleId);
+    const fieldName = section === 'before' ? 'show_before_text' : 'show_after_text';
+    const newValue = !console[fieldName];
+    
+    try {
+      const updatedConsole = await updateConsole(consoleId, { [fieldName]: newValue });
       setCurrentPage({
         ...currentPage,
         consoles: currentPage.consoles.map(c => 
-          c.id === consoleId ? { ...c, ...updates } : c
+          c.id === consoleId ? updatedConsole : c
         )
       });
-    }
-  };
-
-  const toggleTextSection = (pageId, consoleId, section) => {
-    const fieldName = section === 'before' ? 'showBeforeText' : 'showAfterText';
-    const console = currentPage.consoles.find(c => c.id === consoleId);
-    const newValue = !console[fieldName];
-    
-    updateConsole(pageId, consoleId, { [fieldName]: newValue });
-  };
-
-  const deleteConsole = (pageId, consoleId) => {
-    setPages(pages.map(p => 
-      p.id === pageId 
-        ? { ...p, consoles: p.consoles.filter(c => c.id !== consoleId) }
-        : p
-    ));
-    
-    if (currentPage && currentPage.id === pageId) {
-      setCurrentPage({
-        ...currentPage,
-        consoles: currentPage.consoles.filter(c => c.id !== consoleId)
-      });
+    } catch (err) {
+      alert('Erreur: ' + err.message);
     }
   };
 
@@ -330,52 +261,6 @@ const CodeSnippetManager = () => {
     } catch (err) {
       console.error('Erreur lors de la copie:', err);
     }
-  };
-
-  const exportData = () => {
-    const dataToExport = {
-      pages,
-      availableTags,
-      exportDate: new Date().toISOString()
-    };
-    
-    const blob = new Blob([JSON.stringify(dataToExport, null, 2)], {
-      type: 'application/json'
-    });
-    
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `code-snippets-${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const importData = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const importedData = JSON.parse(e.target.result);
-        if (importedData.pages && Array.isArray(importedData.pages)) {
-          setPages(importedData.pages);
-          if (importedData.availableTags) {
-            setAvailableTags(importedData.availableTags);
-          }
-          alert('Données importées avec succès !');
-        } else {
-          alert('Format de fichier invalide.');
-        }
-      } catch (error) {
-        alert('Erreur lors de l\'importation du fichier.');
-      }
-    };
-    reader.readAsText(file);
-    event.target.value = '';
   };
 
   const openPage = (page) => {
@@ -399,53 +284,67 @@ const CodeSnippetManager = () => {
     );
   };
 
-  const addTag = (target, id, newTag) => {
+  const addTag = async (target, id, newTag) => {
     const trimmedTag = newTag.trim();
     if (!trimmedTag) return;
     
-    if (target === 'page') {
-      const currentTags = currentPage.tags || [];
-      if (!currentTags.includes(trimmedTag)) {
-        const newTags = [...currentTags, trimmedTag];
-        updatePageTags(currentPage.id, newTags);
-        setTimeout(() => updateAvailableTags(pages.map(p => 
-          p.id === currentPage.id ? { ...p, tags: newTags } : p
-        )), 100);
-      }
-    } else if (target === 'console') {
-      const console = currentPage.consoles.find(c => c.id === id);
-      if (console) {
-        const currentTags = console.tags || [];
+    try {
+      if (target === 'page') {
+        const currentTags = currentPage.tags || [];
         if (!currentTags.includes(trimmedTag)) {
           const newTags = [...currentTags, trimmedTag];
-          updateConsole(currentPage.id, id, { tags: newTags });
-          setTimeout(() => {
-            const updatedPages = pages.map(p => 
-              p.id === currentPage.id 
-                ? {
-                    ...p, 
-                    consoles: p.consoles.map(c => 
-                      c.id === id ? { ...c, tags: newTags } : c
-                    )
-                  }
-                : p
-            );
-            updateAvailableTags(updatedPages);
-          }, 100);
+          await updatePage(id, { title: currentPage.title, tags: newTags });
+          setCurrentPage({ ...currentPage, tags: newTags });
+        }
+      } else if (target === 'console') {
+        const console = currentPage.consoles.find(c => c.id === id);
+        if (console) {
+          const currentTags = console.tags || [];
+          if (!currentTags.includes(trimmedTag)) {
+            const newTags = [...currentTags, trimmedTag];
+            const updatedConsole = await updateConsole(id, { tags: newTags });
+            setCurrentPage({
+              ...currentPage,
+              consoles: currentPage.consoles.map(c => 
+                c.id === id ? updatedConsole : c
+              )
+            });
+          }
         }
       }
+    } catch (err) {
+      alert('Erreur lors de l\'ajout du tag: ' + err.message);
     }
   };
 
-  const removeTag = (target, id, tagToRemove) => {
-    if (target === 'page') {
-      const currentTags = currentPage.tags || [];
-      updatePageTags(currentPage.id, currentTags.filter(t => t !== tagToRemove));
-    } else if (target === 'console') {
-      const console = currentPage.consoles.find(c => c.id === id);
-      const currentTags = console.tags || [];
-      updateConsole(currentPage.id, id, { tags: currentTags.filter(t => t !== tagToRemove) });
+  const removeTag = async (target, id, tagToRemove) => {
+    try {
+      if (target === 'page') {
+        const currentTags = currentPage.tags || [];
+        const newTags = currentTags.filter(t => t !== tagToRemove);
+        await updatePage(id, { title: currentPage.title, tags: newTags });
+        setCurrentPage({ ...currentPage, tags: newTags });
+      } else if (target === 'console') {
+        const console = currentPage.consoles.find(c => c.id === id);
+        const currentTags = console.tags || [];
+        const newTags = currentTags.filter(t => t !== tagToRemove);
+        const updatedConsole = await updateConsole(id, { tags: newTags });
+        setCurrentPage({
+          ...currentPage,
+          consoles: currentPage.consoles.map(c => 
+            c.id === id ? updatedConsole : c
+          )
+        });
+      }
+    } catch (err) {
+      alert('Erreur lors de la suppression du tag: ' + err.message);
     }
+  };
+
+  // Fonction pour obtenir la valeur (locale ou serveur)
+  const getValue = (type, id, field, defaultValue = '') => {
+    const localKey = `${type}-${id}-${field}`;
+    return localValues[localKey] !== undefined ? localValues[localKey] : defaultValue;
   };
 
   const getSyntaxHighlightClass = (language) => {
@@ -491,6 +390,39 @@ const CodeSnippetManager = () => {
     consoleBg: 'bg-gray-900'
   };
 
+  // Conditions de retour
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-gray-600">Chargement des données partagées...</p>
+          <p className="text-sm text-gray-500 mt-2">Connexion à la base de données...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center max-w-md">
+          <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+            <strong>Erreur de connexion:</strong>
+            <p className="mt-2">{error}</p>
+          </div>
+          <button 
+            onClick={() => window.location.reload()} 
+            className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg"
+          >
+            Réessayer
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Interface principale - Page de recherche
   if (showSearch || !currentPage) {
     return (
       <div className={`min-h-screen ${themeClasses.bg} p-4`}>
@@ -501,7 +433,9 @@ const CodeSnippetManager = () => {
                 <Code className="inline-block mr-2" />
                 Gestionnaire de Snippets
               </h1>
-              <p className={themeClasses.textSecondary}>Organisez et retrouvez facilement vos bouts de code</p>
+              <p className={themeClasses.textSecondary}>
+                Base de données partagée • {pages.length} pages • {availableTags.length} tags
+              </p>
             </div>
             
             <div className="flex items-center gap-2">
@@ -511,33 +445,10 @@ const CodeSnippetManager = () => {
               >
                 {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
               </button>
-              
-              <button
-                onClick={exportData}
-                className={`p-2 rounded-lg ${themeClasses.button} text-white`}
-                title="Exporter les données"
-              >
-                <Download className="w-5 h-5" />
-              </button>
-              
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className={`p-2 rounded-lg ${themeClasses.button} text-white`}
-                title="Importer les données"
-              >
-                <Upload className="w-5 h-5" />
-              </button>
-              
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json"
-                onChange={importData}
-                className="hidden"
-              />
             </div>
           </div>
 
+          {/* Barre de recherche */}
           <div className="relative mb-4">
             <Search className={`absolute left-3 top-1/2 transform -translate-y-1/2 ${themeClasses.textSecondary} w-5 h-5`} />
             <input
@@ -549,6 +460,7 @@ const CodeSnippetManager = () => {
             />
           </div>
 
+          {/* Filtres par tags */}
           <div className="mb-6">
             <div className="flex items-center gap-2 mb-2">
               <button
@@ -591,7 +503,7 @@ const CodeSnippetManager = () => {
 
           <div className="text-center mb-8">
             <button
-              onClick={createNewPage}
+              onClick={handleCreatePage}
               className={`${themeClasses.button} text-white px-6 py-3 rounded-lg flex items-center mx-auto gap-2 transition-colors`}
             >
               <Plus className="w-5 h-5" />
@@ -599,6 +511,7 @@ const CodeSnippetManager = () => {
             </button>
           </div>
 
+          {/* Résultats */}
           <div className="space-y-4">
             {(searchQuery || selectedTags.length > 0) ? (
               searchResults.length > 0 ? (
@@ -651,7 +564,7 @@ const CodeSnippetManager = () => {
                           )}
                         </div>
                         <button
-                          onClick={() => deletePage(page.id)}
+                          onClick={() => handleDeletePage(page.id)}
                           className="text-red-500 hover:text-red-700 p-2"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -662,7 +575,8 @@ const CodeSnippetManager = () => {
                 </>
               ) : (
                 <div className={`text-center ${themeClasses.textSecondary} py-8`}>
-                  Aucun résultat trouvé
+                  Aucun résultat trouvé pour "{searchQuery}"
+                  {selectedTags.length > 0 && ` avec les tags: ${selectedTags.join(', ')}`}
                 </div>
               )
             ) : (
@@ -706,7 +620,7 @@ const CodeSnippetManager = () => {
                           )}
                         </div>
                         <button
-                          onClick={() => deletePage(page.id)}
+                          onClick={() => handleDeletePage(page.id)}
                           className="text-red-500 hover:text-red-700 p-2"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -717,7 +631,7 @@ const CodeSnippetManager = () => {
                 </>
               ) : (
                 <div className={`text-center ${themeClasses.textSecondary} py-8`}>
-                  Aucune page créée. Commencez par créer votre première page !
+                  Aucune page dans la base de données. Créez la première !
                 </div>
               )
             )}
@@ -727,6 +641,7 @@ const CodeSnippetManager = () => {
     );
   }
 
+  // Interface console avec optimisations
   return (
     <div className={`min-h-screen ${themeClasses.bg}`}>
       <nav className={`${themeClasses.cardBg} shadow-sm border-b ${themeClasses.border} p-4`}>
@@ -744,8 +659,8 @@ const CodeSnippetManager = () => {
               <div className="flex items-center gap-2">
                 <input
                   type="text"
-                  value={currentPage.title}
-                  onChange={(e) => updatePageTitle(currentPage.id, e.target.value)}
+                  value={getValue('page', currentPage.id, 'title', currentPage.title)}
+                  onChange={(e) => debouncedUpdate('page', currentPage.id, 'title', e.target.value)}
                   className={`text-xl font-bold bg-transparent border-b-2 border-blue-500 focus:outline-none ${themeClasses.text}`}
                   autoFocus
                 />
@@ -769,7 +684,7 @@ const CodeSnippetManager = () => {
             )}
             
             <button
-              onClick={() => addConsole(currentPage.id)}
+              onClick={() => handleAddConsole(currentPage.id)}
               className={`${themeClasses.button} text-white px-4 py-2 rounded-lg flex items-center gap-2`}
             >
               <Plus className="w-4 h-4" />
@@ -780,6 +695,7 @@ const CodeSnippetManager = () => {
       </nav>
 
       <div className="max-w-6xl mx-auto p-6">
+        {/* Tags de la page */}
         <div className="mb-6">
           <div className="flex items-center gap-2 mb-2">
             <Tag className="w-4 h-4" />
@@ -803,201 +719,210 @@ const CodeSnippetManager = () => {
                 placeholder="Ajouter un tag..."
                 className={`px-3 py-1 text-sm rounded-full ${themeClasses.input} border`}
                 onKeyPress={(e) => {
-                  if (e.key === 'Enter') {
-                    addTag('page', currentPage.id, e.target.value);
-                    e.target.value = '';
-                  }
-                }}
-                id="page-tag-input"
-              />
-              <button
-                onClick={() => {
-                  const input = document.getElementById('page-tag-input');
-                  if (input && input.value.trim()) {
-                    addTag('page', currentPage.id, input.value);
-                    input.value = '';
-                  }
-                }}
-                className="bg-blue-500 hover:bg-blue-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-sm font-bold"
-              >
-                +
-              </button>
-            </div>
-          </div>
-        </div>
+                 if (e.key === 'Enter') {
+                   addTag('page', currentPage.id, e.target.value);
+                   e.target.value = '';
+                 }
+               }}
+               id="page-tag-input"
+             />
+             <button
+               onClick={() => {
+                 const input = document.getElementById('page-tag-input');
+                 if (input && input.value.trim()) {
+                   addTag('page', currentPage.id, input.value);
+                   input.value = '';
+                 }
+               }}
+               className="bg-blue-500 hover:bg-blue-600 text-white rounded-full w-6 h-6 flex items-center justify-center text-sm font-bold"
+             >
+               +
+             </button>
+           </div>
+         </div>
+       </div>
 
-        {currentPage.consoles.length === 0 ? (
-          <div className="text-center py-12">
-            <Code className={`w-16 h-16 mx-auto ${themeClasses.textSecondary} mb-4`} />
-            <h3 className={`text-xl font-medium ${themeClasses.textSecondary} mb-2`}>Aucune console pour le moment</h3>
-            <p className={`${themeClasses.textSecondary} mb-4`}>Ajoutez votre première console de code pour commencer</p>
-            <button
-              onClick={() => addConsole(currentPage.id)}
-              className={`${themeClasses.button} text-white px-6 py-3 rounded-lg flex items-center mx-auto gap-2`}
-            >
-              <Plus className="w-5 h-5" />
-              Ajouter ma première console
-            </button>
-          </div>
-        ) : (
-          <div className="grid gap-6">
-            {currentPage.consoles.map(console => (
-              <div key={console.id} className={`${themeClasses.cardBg} rounded-lg shadow-md overflow-hidden ${themeClasses.border} border`}>
-                
-                {console.showBeforeText && (
-                  <div className={`p-4 border-b ${themeClasses.border}`}>
-                    <textarea
-                      value={console.beforeText || ''}
-                      onChange={(e) => updateConsole(currentPage.id, console.id, { beforeText: e.target.value })}
-                      placeholder="Texte avant le code (contexte, instructions...)..."
-                      className={`w-full p-3 ${themeClasses.input} border rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent`}
-                      rows="3"
-                    />
-                  </div>
-                )}
+       {/* Consoles */}
+       {currentPage.consoles.length === 0 ? (
+         <div className="text-center py-12">
+           <Code className={`w-16 h-16 mx-auto ${themeClasses.textSecondary} mb-4`} />
+           <h3 className={`text-xl font-medium ${themeClasses.textSecondary} mb-2`}>Aucune console pour le moment</h3>
+           <p className={`${themeClasses.textSecondary} mb-4`}>Ajoutez votre première console de code pour commencer</p>
+           <button
+             onClick={() => handleAddConsole(currentPage.id)}
+             className={`${themeClasses.button} text-white px-6 py-3 rounded-lg flex items-center mx-auto gap-2`}
+           >
+             <Plus className="w-5 h-5" />
+             Ajouter ma première console
+           </button>
+         </div>
+       ) : (
+         <div className="grid gap-6">
+           {currentPage.consoles.map(console => (
+             <div key={console.id} className={`${themeClasses.cardBg} rounded-lg shadow-md overflow-hidden ${themeClasses.border} border`}>
+               
+               {/* Zone de texte avant la console */}
+               {console.show_before_text && (
+                 <div className={`p-4 border-b ${themeClasses.border}`}>
+                   <textarea
+                     value={getValue('console', console.id, 'before_text', console.before_text)}
+                     onChange={(e) => debouncedUpdate('console', console.id, 'before_text', e.target.value)}
+                     placeholder="Texte avant le code (contexte, instructions...)..."
+                     className={`w-full p-3 ${themeClasses.input} border rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent`}
+                     rows="3"
+                   />
+                 </div>
+               )}
 
-                <div className={`${themeClasses.consoleBg} text-white p-4`}>
-                  <div className="flex justify-between items-start mb-2">
-                    {editingConsole === console.id ? (
-                      <input
-                        type="text"
-                        value={console.comment}
-                        onChange={(e) => updateConsole(currentPage.id, console.id, { comment: e.target.value })}
-                        className="bg-gray-700 text-white px-3 py-1 rounded flex-1 mr-4 focus:outline-none focus:bg-gray-600"
-                        autoFocus
-                        onBlur={() => setEditingConsole(null)}
-                        onKeyPress={(e) => e.key === 'Enter' && setEditingConsole(null)}
-                      />
-                    ) : (
-                      <h3 
-                        className="font-medium cursor-pointer hover:text-gray-200 flex-1"
-                        onClick={() => setEditingConsole(console.id)}
-                      >
-                        {console.comment}
-                      </h3>
-                    )}
-                    
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => toggleTextSection(currentPage.id, console.id, 'before')}
-                        className={`px-2 py-1 rounded text-xs ${
-                          console.showBeforeText 
-                            ? 'bg-green-600 text-white' 
-                            : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
-                        }`}
-                        title={console.showBeforeText ? "Masquer texte avant" : "Ajouter texte avant"}
-                      >
-                        Avant
-                      </button>
-                      
-                      <button
-                        onClick={() => toggleTextSection(currentPage.id, console.id, 'after')}
-                        className={`px-2 py-1 rounded text-xs ${
-                          console.showAfterText 
-                            ? 'bg-green-600 text-white' 
-                            : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
-                        }`}
-                        title={console.showAfterText ? "Masquer texte après" : "Ajouter texte après"}
-                      >
-                        Après
-                      </button>
-                      
-                      <select
-                        value={console.language || 'javascript'}
-                        onChange={(e) => updateConsole(currentPage.id, console.id, { language: e.target.value })}
-                        className="bg-gray-700 text-white px-2 py-1 rounded text-sm focus:outline-none focus:bg-gray-600"
-                      >
-                        {languages.map(lang => (
-                          <option key={lang} value={lang}>{lang}</option>
-                        ))}
-                      </select>
-                      
-                      <button
-                        onClick={() => copyToClipboard(console.code)}
-                        className="text-gray-300 hover:text-white p-1 rounded hover:bg-gray-700"
-                        title="Copier le code"
-                      >
-                        <Copy className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => deleteConsole(currentPage.id, console.id)}
-                        className="text-red-400 hover:text-red-300 p-1 rounded hover:bg-gray-700"
-                        title="Supprimer la console"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                  
-                  <div className="flex flex-wrap gap-1 mb-2 items-center">
-                    {(console.tags || []).map(tag => (
-                      <span key={tag} className="px-2 py-1 bg-gray-600 text-white text-xs rounded flex items-center gap-1">
-                        {tag}
-                        <button
-                          onClick={() => removeTag('console', console.id, tag)}
-                          className="hover:text-red-200"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </span>
-                    ))}
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="text"
-                        placeholder="Tag..."
-                        className="px-2 py-1 bg-gray-700 text-white text-xs rounded border-none focus:outline-none focus:bg-gray-600"
-                        onKeyPress={(e) => {
-                          if (e.key === 'Enter') {
-                            addTag('console', console.id, e.target.value);
-                            e.target.value = '';
-                          }
-                        }}
-                        id={`console-tag-input-${console.id}`}
-                      />
-                      <button
-                        onClick={() => {
-                          const input = document.getElementById(`console-tag-input-${console.id}`);
-                          if (input && input.value.trim()) {
-                            addTag('console', console.id, input.value);
-                            input.value = '';
-                          }
-                        }}
-                        className="bg-gray-600 hover:bg-gray-500 text-white rounded w-4 h-4 flex items-center justify-center text-xs font-bold"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="p-0">
-                  <textarea
-                    value={console.code}
-                    onChange={(e) => updateConsole(currentPage.id, console.id, { code: e.target.value })}
-                    placeholder="Entrez votre code ici..."
-                    className={`w-full h-40 p-4 font-mono text-sm ${themeClasses.consoleBg} ${getSyntaxHighlightClass(console.language || 'javascript')} border-none resize-none focus:outline-none`}
-                    style={{ fontFamily: 'Consolas, Monaco, "Courier New", monospace' }}
-                  />
-                </div>
+               {/* En-tête de la console */}
+               <div className={`${themeClasses.consoleBg} text-white p-4`}>
+                 <div className="flex justify-between items-start mb-2">
+                   {editingConsole === console.id ? (
+                     <input
+                       type="text"
+                       value={getValue('console', console.id, 'comment', console.comment)}
+                       onChange={(e) => debouncedUpdate('console', console.id, 'comment', e.target.value, 500)}
+                       className="bg-gray-700 text-white px-3 py-1 rounded flex-1 mr-4 focus:outline-none focus:bg-gray-600"
+                       autoFocus
+                       onBlur={() => setEditingConsole(null)}
+                       onKeyPress={(e) => e.key === 'Enter' && setEditingConsole(null)}
+                     />
+                   ) : (
+                     <h3 
+                       className="font-medium cursor-pointer hover:text-gray-200 flex-1"
+                       onClick={() => setEditingConsole(console.id)}
+                     >
+                       {console.comment}
+                     </h3>
+                   )}
+                   
+                   <div className="flex items-center gap-2">
+                     {/* Boutons avant/après */}
+                     <button
+                       onClick={() => toggleTextSection(currentPage.id, console.id, 'before')}
+                       className={`px-2 py-1 rounded text-xs ${
+                         console.show_before_text 
+                           ? 'bg-green-600 text-white' 
+                           : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                       }`}
+                       title={console.show_before_text ? "Masquer texte avant" : "Ajouter texte avant"}
+                     >
+                       Avant
+                     </button>
+                     
+                     <button
+                       onClick={() => toggleTextSection(currentPage.id, console.id, 'after')}
+                       className={`px-2 py-1 rounded text-xs ${
+                         console.show_after_text 
+                           ? 'bg-green-600 text-white' 
+                           : 'bg-gray-600 hover:bg-gray-500 text-gray-300'
+                       }`}
+                       title={console.show_after_text ? "Masquer texte après" : "Ajouter texte après"}
+                     >
+                       Après
+                     </button>
+                     
+                     {/* Sélecteur de langage */}
+                     <select
+                       value={console.language || 'javascript'}
+                       onChange={(e) => debouncedUpdate('console', console.id, 'language', e.target.value, 0)}
+                       className="bg-gray-700 text-white px-2 py-1 rounded text-sm focus:outline-none focus:bg-gray-600"
+                     >
+                       {languages.map(lang => (
+                         <option key={lang} value={lang}>{lang}</option>
+                       ))}
+                     </select>
+                     
+                     {/* Boutons action */}
+                     <button
+                       onClick={() => copyToClipboard(console.code)}
+                       className="text-gray-300 hover:text-white p-1 rounded hover:bg-gray-700"
+                       title="Copier le code"
+                     >
+                       <Copy className="w-4 h-4" />
+                     </button>
+                     <button
+                       onClick={() => handleDeleteConsole(console.id)}
+                       className="text-red-400 hover:text-red-300 p-1 rounded hover:bg-gray-700"
+                       title="Supprimer la console"
+                     >
+                       <Trash2 className="w-4 h-4" />
+                     </button>
+                   </div>
+                 </div>
+                 
+                 {/* Tags de la console */}
+                 <div className="flex flex-wrap gap-1 mb-2 items-center">
+                   {(console.tags || []).map(tag => (
+                     <span key={tag} className="px-2 py-1 bg-gray-600 text-white text-xs rounded flex items-center gap-1">
+                       {tag}
+                       <button
+                         onClick={() => removeTag('console', console.id, tag)}
+                         className="hover:text-red-200"
+                       >
+                         <X className="w-3 h-3" />
+                       </button>
+                     </span>
+                   ))}
+                   <div className="flex items-center gap-1">
+                     <input
+                       type="text"
+                       placeholder="Tag..."
+                       className="px-2 py-1 bg-gray-700 text-white text-xs rounded border-none focus:outline-none focus:bg-gray-600"
+                       onKeyPress={(e) => {
+                         if (e.key === 'Enter') {
+                           addTag('console', console.id, e.target.value);
+                           e.target.value = '';
+                         }
+                       }}
+                       id={`console-tag-input-${console.id}`}
+                     />
+                     <button
+                       onClick={() => {
+                         const input = document.getElementById(`console-tag-input-${console.id}`);
+                         if (input && input.value.trim()) {
+                           addTag('console', console.id, input.value);
+                           input.value = '';
+                         }
+                       }}
+                       className="bg-gray-600 hover:bg-gray-500 text-white rounded w-4 h-4 flex items-center justify-center text-xs font-bold"
+                     >
+                       +
+                     </button>
+                   </div>
+                 </div>
+               </div>
+               
+               {/* Zone de code */}
+               <div className="p-0">
+                 <textarea
+                   value={getValue('console', console.id, 'code', console.code)}
+                   onChange={(e) => debouncedUpdate('console', console.id, 'code', e.target.value)}
+                   placeholder="Entrez votre code ici..."
+                   className={`w-full h-40 p-4 font-mono text-sm ${themeClasses.consoleBg} ${getSyntaxHighlightClass(console.language || 'javascript')} border-none resize-none focus:outline-none`}
+                   style={{ fontFamily: 'Consolas, Monaco, "Courier New", monospace' }}
+                 />
+               </div>
 
-                {console.showAfterText && (
-                  <div className={`p-4 border-t ${themeClasses.border}`}>
-                    <textarea
-                      value={console.afterText || ''}
-                      onChange={(e) => updateConsole(currentPage.id, console.id, { afterText: e.target.value })}
-                      placeholder="Texte après le code (notes, explications, résultats attendus...)..."
-                      className={`w-full p-3 ${themeClasses.input} border rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent`}
-                      rows="3"
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+               {/* Zone de texte après la console */}
+               {console.show_after_text && (
+                 <div className={`p-4 border-t ${themeClasses.border}`}>
+                   <textarea
+                     value={getValue('console', console.id, 'after_text', console.after_text)}
+                     onChange={(e) => debouncedUpdate('console', console.id, 'after_text', e.target.value)}
+                     placeholder="Texte après le code (notes, explications, résultats attendus...)..."
+                     className={`w-full p-3 ${themeClasses.input} border rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-transparent`}
+                     rows="3"
+                   />
+                 </div>
+               )}
+             </div>
+           ))}
+         </div>
+       )}
+     </div>
+   </div>
+ );
 };
 
 export default CodeSnippetManager;
