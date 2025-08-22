@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", sans-serif;
+  }
+}
+
+@layer components {
+  .console-editor {
+    font-family: "Consolas", "Monaco", "Courier New", monospace;
+  }
+}
